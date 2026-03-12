@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pair Your Device - Dark Ima</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        
+        .pairing-container {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .pairing-card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            width: 100%;
+            max-width: 500px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .card-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .card-header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #ffd700, #ff8c00);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .step-indicator {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        
+        .step {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            transition: 0.3s;
+        }
+        
+        .step.active {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            box-shadow: 0 0 20px rgba(102, 126, 234, 0.5);
+        }
+        
+        .step.completed {
+            background: #10b981;
+        }
+        
+        .pairing-step {
+            display: none;
+        }
+        
+        .pairing-step.active {
+            display: block;
+        }
+        
+        .input-group {
+            margin: 20px 0;
+        }
+        
+        .input-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        
+        .input-group input {
+            width: 100%;
+            padding: 15px;
+            border-radius: 10px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            font-size: 16px;
+            transition: 0.3s;
+        }
+        
+        .input-group input:focus {
+            outline: none;
+            border-color: #ffd700;
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.5);
+        }
+        
+        .code-display {
+            text-align: center;
+            margin: 30px 0;
+        }
+        
+        .code-box {
+            background: rgba(0, 0, 0, 0.3);
+            border: 2px dashed #ffd700;
+            border-radius: 15px;
+            padding: 30px;
+        }
+        
+        #pairingCode {
+            font-size: 36px;
+            font-weight: 700;
+            letter-spacing: 5px;
+            background: linear-gradient(135deg, #ffd700, #ff8c00);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .timer-box {
+            text-align: center;
+            margin: 20px 0;
+            padding: 15px;
+            background: rgba(255, 0, 0, 0.1);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 0, 0, 0.3);
+        }
+        
+        #timer {
+            font-size: 24px;
+            font-weight: 700;
+            color: #ff4444;
+        }
+        
+        .how-to-box {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .how-to-box h3 {
+            margin-bottom: 10px;
+            color: #ffd700;
+        }
+        
+        .how-to-box ol {
+            padding-left: 20px;
+        }
+        
+        .how-to-box li {
+            margin-bottom: 8px;
+        }
+        
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border-radius: 10px;
+            border: none;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.3s;
+            margin: 10px 0;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+        
+        .btn-outline {
+            background: transparent;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            color: white;
+        }
+        
+        .btn-outline:hover {
+            border-color: #ffd700;
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .status-text {
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        
+        .back-btn {
+            color: white;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .back-btn:hover {
+            color: #ffd700;
+        }
+        
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .footer i {
+            color: #ff69b4;
+        }
+    </style>
+</head>
+<body>
+    <div class="pairing-container">
+        <div class="pairing-card">
+            <a href="/" class="back-btn">
+                <i class="fas fa-arrow-left"></i> Back to Home
+            </a>
+            
+            <div class="card-header">
+                <h1>🔐 Get Your Session</h1>
+                <p>Enter your phone number to get pairing code</p>
+            </div>
+            
+            <!-- Step 1: Phone Number -->
+            <div id="step1" class="pairing-step active">
+                <div class="step-indicator">
+                    <div class="step active">1</div>
+                    <div class="step">2</div>
+                    <div class="step">3</div>
+                </div>
+                
+                <div class="input-group">
+                    <label>📱 Phone Number (with country code)</label>
+                    <input type="tel" id="phoneNumber" placeholder="e.g., 94716480935" value="94716480935">
+                </div>
+                
+                <button id="generateBtn" class="btn btn-primary">
+                    <i class="fas fa-magic"></i> Generate Pairing Code
+                </button>
+            </div>
+            
+            <!-- Step 2: Code Display -->
+            <div id="step2" class="pairing-step">
+                <div class="step-indicator">
+                    <div class="step completed">✓</div>
+                    <div class="step active">2</div>
+                    <div class="step">3</div>
+                </div>
+                
+                <div class="code-display">
+                    <div class="code-box">
+                        <span id="pairingCode">---- ----</span>
+                    </div>
+                </div>
+                
+                <div class="how-to-box">
+                    <h3>📋 How to use:</h3>
+                    <ol>
+                        <li>Open WhatsApp on your phone</li>
+                        <li>Go to <strong>Settings > Linked Devices</strong></li>
+                        <li>Tap <strong>Link a Device</strong></li>
+                        <li>Enter the code above</li>
+                    </ol>
+                </div>
+                
+                <div class="timer-box">
+                    <i class="far fa-clock"></i> Code expires in: <span id="timer">02:00</span>
+                </div>
+                
+                <div class="status-text" id="loginStatus">
+                    <i class="fas fa-spinner fa-spin"></i> Waiting for login...
+                </div>
+                
+                <button id="cancelBtn" class="btn btn-outline">
+                    <i class="fas fa-times"></i> Cancel
+                </button>
+            </div>
+            
+            <!-- Step 3: Success -->
+            <div id="step3" class="pairing-step">
+                <div class="step-indicator">
+                    <div class="step completed">✓</div>
+                    <div class="step completed">✓</div>
+                    <div class="step active">3</div>
+                </div>
+                
+                <div style="text-align: center; margin: 30px 0;">
+                    <i class="fas fa-check-circle" style="font-size: 80px; color: #10b981;"></i>
+                </div>
+                
+                <h2 style="text-align: center; margin-bottom: 20px;">✅ Success!</h2>
+                
+                <div class="how-to-box">
+                    <p><i class="fas fa-id-card"></i> <strong>Session ID:</strong> <span id="sessionId"></span></p>
+                    <p><i class="fas fa-cloud"></i> <strong>Saved to:</strong> Mega.nz (Dark_Ima_Sessions)</p>
+                    <p><i class="fas fa-check-circle" style="color: #10b981;"></i> A confirmation message has been sent to your WhatsApp</p>
+                </div>
+                
+                <div style="text-align: center; margin-top: 20px;">
+                    <p>Your session is securely stored on Mega.nz</p>
+                    <p style="font-size: 14px; opacity: 0.8;">Session ID format: Dark_Ima_XXXXXXXX</p>
+                </div>
+                
+                <a href="/" class="btn btn-primary">
+                    <i class="fas fa-home"></i> Back to Home
+                </a>
+            </div>
+            
+            <div class="footer">
+                <p>Made with <i class="fas fa-heart"></i> by Dark Ima</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="js/pair.js"></script>
+</body>
+  </html>
