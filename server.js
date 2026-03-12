@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const http = require('http');
 const socketIO = require('socket.io');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const fs = require('fs-extra');
@@ -14,9 +14,7 @@ const rateLimit = require('express-rate-limit');
 const session = require('express-session');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
-const cron = require('node-cron');
 const MegaStorage = require('./mega-storage');
-const GitHubSync = require('./github-sync');
 const config = require('./config');
 
 // Initialize Express app
@@ -29,37 +27,12 @@ const io = socketIO(server, {
     }
 });
 
-// Initialize services
+// Initialize Mega storage
 const megaStorage = new MegaStorage(
     config.mega.email,
     config.mega.password,
     config.mega.sessionFolder
 );
-const githubSync = new GitHubSync();
-
-// Middleware
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(compression());
-app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static(config.server.publicPath));
-
-// Session middleware
-app.use(session({
-    secret: 'dark-ima-pair-site-secret',
-    resave: false,
-    saveUninitialized: true,
-    cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 50,
-    message: 'Too many requests, please try again later.'
-});
-app.use('/api/', limiter);
 
 // Ensure directories exist
 fs.ensureDirSync(config.server.sessionPath);
@@ -67,10 +40,17 @@ fs.ensureDirSync(path.join(config.server.publicPath, 'images'));
 
 // Store active pairing sessions
 const activeSessions = new Map();
-const connectedBots = new Map();
+
+// Middleware setup
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(compression());
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.static(config.server.publicPath));
 
 // ============================================
-// PAIRING CODE GENERATION
+// FIXED PAIRING CODE GENERATION WITH LOGIN DETECTION
 // ============================================
 
 async function generatePairingCode(phoneNumber) {
@@ -80,7 +60,7 @@ async function generatePairingCode(phoneNumber) {
         // Clean phone number
         let cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
         
-        // Format with country code (default 94 for Sri Lanka)
+        // Format with country code
         if (cleanNumber.length === 9) {
             cleanNumber = '94' + cleanNumber;
         } else if (cleanNumber.startsWith('0')) {
@@ -102,33 +82,143 @@ async function generatePairingCode(phoneNumber) {
         // Load auth state
         const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
         
-        // Create socket
+        // Create socket with proper configuration
         const sock = makeWASocket({
             version,
             auth: state,
             logger: pino({ level: 'silent' }),
-            browser: ['Dark Ima Pair Site', 'Chrome', '1.0.0'],
+            browser: Browsers.appropriate('Desktop'),
             syncFullHistory: false,
-            markOnlineOnConnect: false,
-            defaultQueryTimeoutMs: 60000
+            markOnlineOnConnect: true,
+            defaultQueryTimeoutMs: 60000,
+            generateHighQualityLinkPreview: false,
+            shouldSyncHistoryMessage: false
         });
 
         // Handle credentials update
         sock.ev.on('creds.update', saveCreds);
 
+        // FIX: Properly detect connection updates
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            
+            console.log(chalk.yellow(`📡 Connection update for ${cleanNumber}:`, connection || 'connecting'));
+            
+            if (connection === 'open') {
+                console.log(chalk.green(`✅ User ${cleanNumber} successfully logged in!`));
+                
+                // Get user info
+                const userJid = sock.user.id;
+                const userName = sock.user.name || 'User';
+                
+                // Update session status
+                const session = activeSessions.get(sessionId);
+                if (session) {
+                    session.status = 'connected';
+                    session.userJid = userJid;
+                    session.userName = userName;
+                    session.connectedAt = Date.now();
+                    activeSessions.set(sessionId, session);
+                    
+                    // Read creds file to get full info
+                    try {
+                        const credsPath = path.join(sessionDir, 'creds.json');
+                        if (await fs.pathExists(credsPath)) {
+                            const creds = await fs.readJSON(credsPath);
+                            
+                            // Save to Mega
+                            await megaStorage.saveSession(sessionId, creds);
+                            console.log(chalk.green(`✓ Session saved to Mega: ${sessionId}`));
+                            
+                            // FIX: Send confirmation message to WhatsApp
+                            try {
+                                // Send detailed success message
+                                await sock.sendMessage(userJid, {
+                                    text: `✅ *WhatsApp Session Connected Successfully!*\n\n` +
+                                          `📱 *Number:* ${cleanNumber}\n` +
+                                          `🆔 *Session ID:* \`${sessionId}\`\n` +
+                                          `💾 *Saved to:* Mega.nz (${config.mega.sessionFolder})\n` +
+                                          `📅 *Time:* ${new Date().toLocaleString()}\n\n` +
+                                          `🔐 *Your session is now active and backed up securely.*\n\n` +
+                                          `> ${config.bot.footer}`
+                                });
+                                
+                                // Also send a simple sticker/message to confirm
+                                await sock.sendMessage(userJid, {
+                                    text: `🎉 *Welcome to Dark Ima Bot!*\nUse .menu to see available commands.`
+                                });
+                                
+                                console.log(chalk.green(`✓ Confirmation message sent to ${cleanNumber}`));
+                            } catch (msgError) {
+                                console.log(chalk.yellow('Could not send message to device:', msgError.message));
+                            }
+                            
+                            // Emit socket event
+                            io.to(`session-${sessionId}`).emit('login-success', {
+                                sessionId,
+                                userJid,
+                                userName,
+                                phoneNumber: cleanNumber
+                            });
+                        }
+                    } catch (error) {
+                        console.error(chalk.red('Error saving session:', error));
+                    }
+                }
+            }
+            
+            if (connection === 'close') {
+                const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+                console.log(chalk.yellow(`Connection closed for ${cleanNumber}. Reconnect: ${shouldReconnect}`));
+                
+                if (!shouldReconnect) {
+                    // User logged out
+                    const session = activeSessions.get(sessionId);
+                    if (session) {
+                        session.status = 'logged_out';
+                        activeSessions.set(sessionId, session);
+                        
+                        io.to(`session-${sessionId}`).emit('logout', {
+                            message: 'User logged out'
+                        });
+                    }
+                }
+            }
+        });
+
+        // FIX: Monitor messages to detect when device is ready
+        sock.ev.on('messages.upsert', async ({ messages, type }) => {
+            if (type === 'notify') {
+                // This confirms the socket is receiving messages (user is logged in)
+                console.log(chalk.green(`📨 Messages detected for ${cleanNumber} - User is active`));
+                
+                // Check if we haven't already marked as connected
+                const session = activeSessions.get(sessionId);
+                if (session && session.status !== 'connected') {
+                    console.log(chalk.green(`✓ User ${cleanNumber} is now active!`));
+                    
+                    // This will trigger the connection update handler
+                }
+            }
+        });
+
         // Wait for socket to be ready
         await new Promise(resolve => setTimeout(resolve, 2000));
 
-        // Request pairing code
+        // Request pairing code with retry
         let pairingCode = null;
         let retries = 3;
         
         while (retries > 0 && !pairingCode) {
             try {
+                console.log(chalk.blue(`🔄 Requesting pairing code for ${cleanNumber} (attempt ${4 - retries}/3)...`));
+                
                 pairingCode = await sock.requestPairingCode(cleanNumber);
                 
                 if (pairingCode) {
                     const formattedCode = pairingCode.match(/.{1,4}/g)?.join('-') || pairingCode;
+                    
+                    console.log(chalk.green(`✅ Pairing code generated: ${formattedCode}`));
                     
                     // Store session info
                     activeSessions.set(sessionId, {
@@ -159,7 +249,7 @@ async function generatePairingCode(phoneNumber) {
             }
         }
         
-        throw new Error('Failed to generate pairing code');
+        throw new Error('Failed to generate pairing code after multiple attempts');
         
     } catch (error) {
         console.error(chalk.red('❌ Pairing error:', error));
@@ -207,7 +297,7 @@ app.post('/api/pair/generate', async (req, res) => {
     }
 });
 
-// Check login status
+// FIX: Improved login status check
 app.get('/api/session/status/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
     const session = activeSessions.get(sessionId);
@@ -226,37 +316,8 @@ app.get('/api/session/status/:sessionId', async (req, res) => {
         if (await fs.pathExists(credsPath)) {
             const creds = await fs.readJSON(credsPath);
             
-            if (creds.registered && creds.me) {
-                session.status = 'connected';
-                
-                // Save session to Mega
-                const megaResult = await megaStorage.saveSession(sessionId, creds);
-                
-                if (megaResult.success) {
-                    console.log(chalk.green(`✓ Session saved to Mega: ${sessionId}`));
-                    
-                    // Send message to linked device
-                    try {
-                        await session.sock.sendMessage(creds.me.id, {
-                            text: `✅ *Your session has been saved successfully!*\n\n` +
-                                  `📱 *Session ID:* \`${sessionId}\`\n` +
-                                  `💾 *Saved to:* Mega.nz (${config.mega.sessionFolder})\n` +
-                                  `👤 *Number:* ${session.phoneNumber}\n\n` +
-                                  `> ${config.bot.footer}`
-                        });
-                    } catch (msgError) {
-                        console.log(chalk.yellow('Could not send message to device:', msgError.message));
-                    }
-                    
-                    // Store in connected bots
-                    connectedBots.set(session.phoneNumber, {
-                        sessionId,
-                        jid: creds.me.id,
-                        name: creds.me.name,
-                        connectedAt: Date.now()
-                    });
-                }
-                
+            // Check if registered AND has me object (fully logged in)
+            if (creds.registered && creds.me && session.status === 'connected') {
                 return res.json({
                     success: true,
                     status: 'connected',
@@ -267,14 +328,22 @@ app.get('/api/session/status/:sessionId', async (req, res) => {
                         name: creds.me.name || 'Unknown',
                         phone: session.phoneNumber
                     },
-                    megaSaved: megaResult.success
+                    megaSaved: true
+                });
+            } else if (creds.registered) {
+                // Registered but not yet marked as connected
+                return res.json({
+                    success: true,
+                    status: 'registered',
+                    loggedIn: false
                 });
             }
         }
         
+        // Check if session exists but not logged in
         res.json({
             success: true,
-            status: session.status,
+            status: session.status || 'pending',
             loggedIn: false,
             expiresIn: Math.floor((session.expiresAt - Date.now()) / 1000)
         });
@@ -287,228 +356,70 @@ app.get('/api/session/status/:sessionId', async (req, res) => {
     }
 });
 
-// Download session file
-app.get('/api/session/download/:sessionId/:type', async (req, res) => {
-    const { sessionId, type } = req.params;
-    const session = activeSessions.get(sessionId);
-    
-    if (!session) {
-        return res.status(404).json({
-            success: false,
-            error: 'Session not found'
-        });
-    }
-    
-    try {
-        const credsPath = path.join(session.sessionDir, 'creds.json');
-        
-        if (!await fs.pathExists(credsPath)) {
-            return res.status(404).json({
-                success: false,
-                error: 'Session files not found'
-            });
-        }
-        
-        const creds = await fs.readJSON(credsPath);
-        
-        if (type === 'creds') {
-            res.download(credsPath, `creds_${session.phoneNumber}.json`);
-        } else if (type === 'full') {
-            // Create zip of all session files
-            const archiver = require('archiver');
-            const zipPath = path.join(config.server.sessionPath, `${sessionId}.zip`);
-            
-            const output = fs.createWriteStream(zipPath);
-            const archive = archiver('zip', { zlib: { level: 9 } });
-            
-            archive.pipe(output);
-            
-            // Add all session files
-            const files = await fs.readdir(session.sessionDir);
-            for (const file of files) {
-                if (file.endsWith('.json')) {
-                    const filePath = path.join(session.sessionDir, file);
-                    archive.file(filePath, { name: `session/${file}` });
-                }
-            }
-            
-            // Add README
-            const readme = `# WhatsApp Session Files
-Session ID: ${sessionId}
-Phone: ${session.phoneNumber}
-Date: ${new Date().toISOString()}
-${config.bot.footer}`;
-            
-            archive.append(readme, { name: 'README.txt' });
-            
-            await archive.finalize();
-            
-            output.on('close', () => {
-                res.download(zipPath, `session_${session.phoneNumber}.zip`, (err) => {
-                    if (err) console.error('Download error:', err);
-                    setTimeout(() => fs.remove(zipPath).catch(console.error), 5000);
-                });
-            });
-        }
-        
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Get session info
-app.get('/api/session/info/:sessionId', async (req, res) => {
+// FIX: Force check login endpoint
+app.get('/api/session/force-check/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
     const session = activeSessions.get(sessionId);
     
     if (!session) {
-        // Check if in Mega
-        const megaResult = await megaStorage.loadSession(sessionId);
-        if (megaResult.success) {
-            return res.json({
-                success: true,
-                fromMega: true,
-                sessionId: sessionId,
-                data: {
-                    registered: true,
-                    me: megaResult.data.me
-                }
-            });
-        }
-        
-        return res.status(404).json({
+        return res.json({
             success: false,
             error: 'Session not found'
         });
     }
     
     try {
+        // Force check by reading creds directly
         const credsPath = path.join(session.sessionDir, 'creds.json');
         
         if (await fs.pathExists(credsPath)) {
+            const stats = await fs.stat(credsPath);
             const creds = await fs.readJSON(credsPath);
             
-            res.json({
-                success: true,
-                sessionId: sessionId,
-                phoneNumber: session.phoneNumber,
-                status: session.status,
-                loggedIn: creds.registered && creds.me,
-                user: creds.me ? {
-                    id: creds.me.id,
-                    name: creds.me.name
-                } : null
-            });
-        } else {
-            res.json({
-                success: true,
-                sessionId: sessionId,
-                phoneNumber: session.phoneNumber,
-                status: session.status,
-                loggedIn: false
-            });
+            // Check if file was recently modified (new login)
+            const now = Date.now();
+            const fileAge = now - stats.mtimeMs;
+            
+            if (creds.registered && creds.me) {
+                // Mark session as connected
+                session.status = 'connected';
+                activeSessions.set(sessionId, session);
+                
+                // Save to Mega
+                await megaStorage.saveSession(sessionId, creds);
+                
+                // Send confirmation message if not already sent
+                try {
+                    await session.sock.sendMessage(creds.me.id, {
+                        text: `✅ *Session Connected!*\n\n🆔 ${sessionId}\n💾 Saved to Mega.nz\n\n> ${config.bot.footer}`
+                    });
+                } catch (msgError) {
+                    console.log('Could not send message:', msgError.message);
+                }
+                
+                return res.json({
+                    success: true,
+                    loggedIn: true,
+                    user: {
+                        id: creds.me.id,
+                        name: creds.me.name,
+                        phone: session.phoneNumber
+                    },
+                    fileAge
+                });
+            }
         }
+        
+        res.json({
+            success: true,
+            loggedIn: false
+        });
         
     } catch (error) {
         res.json({
             success: false,
             error: error.message
         });
-    }
-});
-
-// List all sessions from Mega
-app.get('/api/sessions/list', async (req, res) => {
-    const result = await megaStorage.listSessions();
-    res.json(result);
-});
-
-// Delete session
-app.delete('/api/session/:sessionId', async (req, res) => {
-    const { sessionId } = req.params;
-    
-    // Delete from Mega
-    const megaResult = await megaStorage.deleteSession(sessionId);
-    
-    // Delete local session
-    const session = activeSessions.get(sessionId);
-    if (session) {
-        await fs.remove(session.sessionDir);
-        activeSessions.delete(sessionId);
-    }
-    
-    res.json({
-        success: true,
-        message: 'Session deleted successfully'
-    });
-});
-
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'online',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        activeSessions: activeSessions.size,
-        connectedBots: connectedBots.size,
-        megaConnected: megaStorage.connected,
-        footer: config.bot.footer
-    });
-});
-
-// ============================================
-// AUTO-UPDATE SYSTEM
-// ============================================
-
-// Initialize GitHub sync
-githubSync.init().catch(console.error);
-
-// Check for updates periodically
-if (config.autoUpdate.enabled) {
-    setInterval(async () => {
-        try {
-            const update = await githubSync.checkForUpdates();
-            
-            if (update.hasUpdate) {
-                console.log(chalk.yellow('📦 Update found! Pulling changes...'));
-                
-                const result = await githubSync.pullUpdates();
-                
-                if (result.success && config.autoUpdate.restartAfterUpdate) {
-                    console.log(chalk.yellow('🔄 Restarting server to apply updates...'));
-                    process.exit(0);
-                }
-            }
-        } catch (error) {
-            console.error(chalk.red('Auto-update error:', error.message));
-        }
-    }, config.autoUpdate.interval);
-    
-    console.log(chalk.green(`✓ Auto-update enabled (checking every ${config.autoUpdate.interval / 60000} minutes)`));
-}
-
-// Webhook for GitHub pushes
-app.post('/api/github/webhook', express.json({ type: 'application/json' }), async (req, res) => {
-    const event = req.headers['x-github-event'];
-    
-    if (event === 'push') {
-        console.log(chalk.blue('📦 GitHub push event received'));
-        
-        const result = await githubSync.pullUpdates();
-        
-        if (result.success && config.autoUpdate.restartAfterUpdate) {
-            setTimeout(() => {
-                console.log(chalk.yellow('🔄 Restarting server to apply updates...'));
-                process.exit(0);
-            }, 3000);
-        }
-        
-        res.json({ success: true, message: 'Update initiated' });
-    } else {
-        res.json({ success: true, message: 'Event received' });
     }
 });
 
@@ -522,6 +433,15 @@ io.on('connection', (socket) => {
     socket.on('join-session', (sessionId) => {
         socket.join(`session-${sessionId}`);
         console.log(chalk.blue(`Socket joined room: session-${sessionId}`));
+        
+        // Send initial status
+        const session = activeSessions.get(sessionId);
+        if (session) {
+            socket.emit('session-status', {
+                status: session.status,
+                sessionId: sessionId
+            });
+        }
     });
     
     socket.on('disconnect', () => {
@@ -537,9 +457,15 @@ setInterval(() => {
     const now = Date.now();
     for (const [sessionId, session] of activeSessions.entries()) {
         if (now > session.expiresAt + 300000) { // 5 minutes after expiry
+            // Close socket connection
+            try {
+                session.sock?.end();
+            } catch (error) {}
+            
+            // Remove session directory
             fs.remove(session.sessionDir).catch(console.error);
             activeSessions.delete(sessionId);
-            console.log(chalk.yellow(`🧹 Cleaned up session: ${sessionId}`));
+            console.log(chalk.yellow(`🧹 Cleaned up expired session: ${sessionId}`));
         }
     }
 }, 60000);
@@ -560,6 +486,18 @@ app.get('/success', (req, res) => {
     res.sendFile(path.join(config.server.publicPath, 'success.html'));
 });
 
+// Health check
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'online',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        activeSessions: activeSessions.size,
+        megaConnected: megaStorage.connected,
+        footer: config.bot.footer
+    });
+});
+
 // ============================================
 // START SERVER
 // ============================================
@@ -571,31 +509,29 @@ server.listen(config.server.port, '0.0.0.0', async () => {
     
     console.log(chalk.cyan(`🌐 Server running on: http://localhost:${config.server.port}`));
     console.log(chalk.cyan(`📱 Pairing page: http://localhost:${config.server.port}/pair`));
-    console.log(chalk.cyan(`📊 Health check: http://localhost:${config.server.port}/api/health\n`));
     
     // Connect to Mega
     await megaStorage.connect();
     
-    console.log(chalk.green(`✓ ${config.bot.footer}`));
+    console.log(chalk.green(`\n✓ ${config.bot.footer}`));
 });
 
 // Handle process termination
 process.on('SIGINT', async () => {
     console.log(chalk.yellow('\n👋 Shutting down...'));
     
-    // Clean up sessions
+    // Close all socket connections
     for (const [sessionId, session] of activeSessions.entries()) {
-        await fs.remove(session.sessionDir).catch(console.error);
+        try {
+            session.sock?.end();
+            await fs.remove(session.sessionDir);
+        } catch (error) {}
     }
     
     server.close(() => {
         console.log(chalk.green('✓ Server closed'));
         process.exit(0);
     });
-});
-
-process.on('uncaughtException', (err) => {
-    console.error(chalk.red('Uncaught exception:', err));
 });
 
 module.exports = app;
