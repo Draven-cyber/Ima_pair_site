@@ -1,0 +1,36 @@
+{
+  "name": "ima-pair-site",
+  "version": "1.0.0",
+  "description": "Ima Pair Site with GitHub Auto-Update & Mega Storage",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "update": "node github-sync.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "@whiskeysockets/baileys": "^6.5.0",
+    "megajs": "^1.1.0",
+    "qrcode": "^1.5.3",
+    "pino": "^8.17.2",
+    "fs-extra": "^11.2.0",
+    "archiver": "^6.0.1",
+    "axios": "^1.6.2",
+    "chalk": "^4.1.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4",
+    "express-rate-limit": "^7.1.0",
+    "dotenv": "^16.3.1",
+    "moment-timezone": "^0.5.43",
+    "crypto": "^1.0.1",
+    "@octokit/rest": "^20.0.2",
+    "simple-git": "^3.22.0",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
